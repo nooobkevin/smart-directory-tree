@@ -1,36 +1,38 @@
-# smart-directory-tree
-A Python script that generates directory trees and retrieve file content, while respecting `.gitignore` rules and excluding `.git/` directories.
+# DirTreePro
+
+Enhanced directory tree generator with .gitignore awareness and file preview capabilities
 
 ## Features
+- 📂 Auto-detects current directory as default root
+- 🚫 Respects .gitignore rules and excludes .git/ 
+- 📝 Optional file content preview
+- 🌳 Clean ASCII tree formatting
 
-- Generates folder structure with ASCII tree formatting
-- Automatically ignores patterns from `.gitignore` files
-- Excludes `.git/` directories by default
-- Optional file content display for specified files
+## Prerequisite
+```bash
+pip install gitignore-parser
+```
 
 ## Usage
-
 ```bash
-python directory_tree.py <root_directory> [file1] [file2 ...]
+# Basic usage (current directory)
+dirtreepro
+
+# Specific directory with file preview
+dirtreepro path/to/dir file1.txt file2.js
 ```
 
-**Example:**
+## Examples
 ```bash
-python directory_tree.py my_project src/main.py
-```
-
-**Sample Output:**
-```
-my_project/
+$ dirtreepro
+project-root/
 ├── src/
-│   ├── main.py
-│   └── utils/
+│   └── index.js
 └── README.md
 
-src/main.py:
-print("Hello World")
+$ dirtreepro .gitignore
+.gitignore:
 ```
-
-## Requirements
-- Python 3.6+
-- `gitignore-parser` package (`pip install gitignore-parser`)
+node_modules/
+*.log
+```
