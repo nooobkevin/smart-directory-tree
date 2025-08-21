@@ -1,0 +1,300 @@
+#!/bin/bash
+
+# A script to generate a single-file context of a code repository or directory.
+# It intelligently uses Git features if available, otherwise falls back to find.
+
+set -euo pipefail
+
+# --- Default Configuration ---
+DEFAULT_OUTPUT_FILE="repo.txt"
+DEFAULT_TREE_EXCLUDE=".git|node_modules|dist|build|target|venv|__pycache__|.pytest_cache|.coverage"
+DEFAULT_CONTENT_EXCLUDE="*.lock|LICENSE|*.pyc|*.pyo|*.pyd|*.so|*.dll|*.dylib|*.exe"
+
+# --- Global State ---
+IS_GIT_REPO=0 # 0 for false, 1 for true
+
+# --- Help/Usage Message ---
+usage() {
+  cat << EOF
+Usage: $(basename "$0") [options]
+
+Generates a single-file context snapshot of the current directory.
+If run inside a Git repository, it will respect .gitignore files.
+
+General Options:
+  -o, --output <file>      Output file (default: ./${DEFAULT_OUTPUT_FILE})
+  -h, --help               Show this help and exit
+
+Content Options (Part II - Primary):
+  -E, --only-exclude <p>   Override default content exclude glob pattern.
+  -e, --extra-exclude <p>  Add extra glob patterns to content exclude (pipe-separated).
+  -i, --extra-include <p>  Force include files matching this glob pattern in content.
+  -N, --no-gitignore       Don't use .gitignore for content filtering (has no effect outside a Git repo).
+
+Tree Options (Part I - Long-only):
+  --tree-only-exclude <p>   Override default tree exclude glob pattern.
+  --tree-extra-exclude <p>  Add extra glob patterns to tree exclude.
+  --tree-extra-include <p>  Force include files/dirs matching this glob pattern in the tree.
+  --tree-no-gitignore       Don't use .gitignore for tree filtering.
+EOF
+  exit 0
+}
+
+# --- Initialize Variables ---
+OUTPUT_FILE="${DEFAULT_OUTPUT_FILE}"
+TREE_ONLY_EXCLUDE=""
+TREE_EXTRA_EXCLUDE=""
+TREE_EXTRA_INCLUDE=""
+TREE_USE_GITIGNORE=1
+CONTENT_ONLY_EXCLUDE=""
+CONTENT_EXTRA_EXCLUDE=""
+CONTENT_EXTRA_INCLUDE=""
+CONTENT_USE_GITIGNORE=1
+
+# --- Check Environment ---
+check_if_git_repo() {
+  if git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    IS_GIT_REPO=1
+  else
+    IS_GIT_REPO=0
+  fi
+}
+
+# --- Parse Arguments ---
+parse_args() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -h|--help) usage ;;
+      -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
+      -E|--only-exclude) CONTENT_ONLY_EXCLUDE="$2"; shift 2 ;;
+      -e|--extra-exclude) CONTENT_EXTRA_EXCLUDE="$2"; shift 2 ;;
+      -i|--extra-include) CONTENT_EXTRA_INCLUDE="$2"; shift 2 ;;
+      -N|--no-gitignore) CONTENT_USE_GITIGNORE=0; shift ;;
+      --tree-only-exclude) TREE_ONLY_EXCLUDE="$2"; shift 2 ;;
+      --tree-extra-exclude) TREE_EXTRA_EXCLUDE="$2"; shift 2 ;;
+      --tree-extra-include) TREE_EXTRA_INCLUDE="$2"; shift 2 ;;
+      --tree-no-gitignore) TREE_USE_GITIGNORE=0; shift ;;
+      *) echo "Unknown option: $1" >&2; echo "Use -h or --help for usage." >&2; exit 1 ;;
+    esac
+  done
+}
+
+# --- Pattern Handling ---
+build_patterns() {
+  local tree_exclude_glob="${TREE_ONLY_EXCLUDE:-$DEFAULT_TREE_EXCLUDE}"
+  if [ -n "${TREE_EXTRA_EXCLUDE}" ]; then
+    tree_exclude_glob="${tree_exclude_glob}|${TREE_EXTRA_EXCLUDE}"
+  fi
+  local output_basename
+  output_basename=$(basename "${OUTPUT_FILE}")
+  EFFECTIVE_TREE_EXCLUDE_GLOB="${tree_exclude_glob}|${output_basename}"
+  EFFECTIVE_TREE_INCLUDE_GLOB="${TREE_EXTRA_INCLUDE}"
+
+  local content_exclude_glob="${CONTENT_ONLY_EXCLUDE:-$DEFAULT_CONTENT_EXCLUDE}"
+  if [ -n "${CONTENT_EXTRA_EXCLUDE}" ]; then
+    content_exclude_glob="${content_exclude_glob}|${CONTENT_EXTRA_EXCLUDE}"
+  fi
+  EFFECTIVE_CONTENT_EXCLUDE_GLOB="${content_exclude_glob}|${output_basename}"
+  EFFECTIVE_CONTENT_INCLUDE_GLOB="${CONTENT_EXTRA_INCLUDE}"
+}
+
+# --- Path Filtering Logic ---
+path_matches_glob_list() {
+  local path="$1"
+  local glob_list="$2"
+  local saved_ifs=$IFS
+  IFS='|'
+  for pattern in $glob_list; do
+    IFS=$saved_ifs
+    case "$path" in
+      $pattern|"$pattern/"*) return 0 ;;
+    esac
+    IFS='|'
+  done
+  IFS=$saved_ifs
+  return 1
+}
+
+path_is_ancestor_of_glob_list() {
+    local path="$1"
+    local glob_list="$2"
+    local saved_ifs=$IFS
+    IFS='|'
+    for pattern in $glob_list; do
+        IFS=$saved_ifs
+        case "$pattern" in
+            "$path/"*) return 0 ;;
+        esac
+        IFS='|'
+    done
+    IFS=$saved_ifs
+    return 1
+}
+
+should_exclude_path() {
+  local path="$1"
+  local use_gitignore="$2"
+  local exclude_glob="$3"
+  local include_glob="$4"
+
+  if [ "$path" = "." ]; then return 1; fi
+
+  if [ -n "$include_glob" ] && path_matches_glob_list "$path" "$include_glob"; then
+    return 1
+  fi
+  
+  local is_git_ignored=1 # 1 = false
+  if [ "$IS_GIT_REPO" -eq 1 ] && [ "$use_gitignore" -eq 1 ] && git check-ignore -q "$path"; then
+    is_git_ignored=0 # 0 = true
+  fi
+
+  local is_custom_ignored=1
+  if [ -n "$exclude_glob" ] && path_matches_glob_list "$path" "$exclude_glob"; then
+    is_custom_ignored=0
+  fi
+
+  if [ $is_git_ignored -eq 0 ] || [ $is_custom_ignored -eq 0 ]; then
+    if [ -n "$include_glob" ] && path_is_ancestor_of_glob_list "$path" "$include_glob"; then
+      return 1
+    fi
+    return 0
+  fi
+
+  return 1
+}
+
+# --- Part I: Smart Tree Generation ---
+generate_smart_tree() {
+  echo "Project Structure:"
+  echo "=================="
+  echo "."
+  build_tree_recursive "." ""
+}
+
+build_tree_recursive() {
+  local dir_path="$1"
+  local prefix="$2"
+  
+  local items=()
+  while IFS= read -r item; do
+    items+=("$item")
+  done < <(ls -A "$dir_path" | sort)
+
+  local num_items=${#items[@]}
+  local count=0
+
+  for item in "${items[@]}"; do
+    count=$((count + 1))
+    local full_path="${dir_path%/}/$item"
+    full_path=${full_path#./}
+
+    local connector="├──"
+    local new_prefix="│   "
+    if [ "$count" -eq "$num_items" ]; then
+      connector="└──"
+      new_prefix="    "
+    fi
+
+    if should_exclude_path "$full_path" "$TREE_USE_GITIGNORE" "$EFFECTIVE_TREE_EXCLUDE_GLOB" "$EFFECTIVE_TREE_INCLUDE_GLOB"; then
+        echo "${prefix}${connector} ${item}"
+        if [ -d "$full_path" ]; then
+            local files
+            files=$(find "$full_path" -type f 2>/dev/null | wc -l | tr -d ' ')
+            local dirs
+            dirs=$(find "$full_path" -type d 2>/dev/null | wc -l | tr -d ' ')
+            
+            if [ "$dirs" -gt 0 ]; then
+                dirs=$((dirs - 1))
+            fi
+            echo "${prefix}${new_prefix}└── <ignored $files files, $dirs directories>"
+        fi
+    else
+      if [ -d "$full_path" ]; then
+        echo "${prefix}${connector} ${item}/"
+        build_tree_recursive "$full_path" "${prefix}${new_prefix}"
+      else
+        echo "${prefix}${connector} ${item}"
+      fi
+    fi
+  done
+}
+
+# --- Part II: File Content Generation ---
+get_all_files_for_content() {
+    # If it's a git repo and user wants to use gitignore, use git ls-files.
+    if [ "$IS_GIT_REPO" -eq 1 ] && [ "$CONTENT_USE_GITIGNORE" -eq 1 ]; then
+        git ls-files -co --exclude-standard
+    else
+        # Otherwise, fall back to `find`. Manually exclude .git directory.
+        find . -type f -not -path './.git/*'
+    fi
+}
+
+generate_file_contents() {
+  echo "File Contents:"
+  echo "=============="
+
+  get_all_files_for_content | while IFS= read -r file_path; do
+    local norm_path=${file_path#./}
+
+    if should_exclude_path "$norm_path" "$CONTENT_USE_GITIGNORE" "$EFFECTIVE_CONTENT_EXCLUDE_GLOB" "$EFFECTIVE_CONTENT_INCLUDE_GLOB"; then
+        continue
+    fi
+
+    echo ""
+    echo "--- File: ${norm_path} ---"
+    echo '```'
+    cat "$norm_path" 2>/dev/null || echo "[Error reading file]"
+    echo
+    echo '```'
+  done
+}
+
+# --- Main Function ---
+main() {
+  check_if_git_repo
+  parse_args "$@"
+  build_patterns
+
+  (
+    echo "Generating project context..."
+    if [ "$IS_GIT_REPO" -eq 0 ]; then
+        echo "Note: Not a Git repository. .gitignore files will be ignored."
+    fi
+    echo "  Output file:             ${OUTPUT_FILE}"
+    echo
+    echo "  Content Configuration (Primary):"
+    echo "    Exclude pattern (glob): ${EFFECTIVE_CONTENT_EXCLUDE_GLOB}"
+    if [ -n "${CONTENT_EXTRA_INCLUDE}" ]; then
+      echo "    Force include (glob):  ${CONTENT_EXTRA_INCLUDE}"
+    fi
+    [ "$IS_GIT_REPO" -eq 1 ] && echo "    Use .gitignore:        $([ "$CONTENT_USE_GITIGNORE" -eq 1 ] && echo "yes" || echo "no")"
+    echo
+    echo "  Tree Configuration:"
+    echo "    Exclude pattern (glob): ${EFFECTIVE_TREE_EXCLUDE_GLOB}"
+    if [ -n "${TREE_EXTRA_INCLUDE}" ]; then
+      echo "    Force include (glob):  ${TREE_EXTRA_INCLUDE}"
+    fi
+    [ "$IS_GIT_REPO" -eq 1 ] && echo "    Use .gitignore:        $([ "$TREE_USE_GITIGNORE" -eq 1 ] && echo "yes" || echo "no")"
+    echo
+  ) >&2
+
+  {
+    generate_smart_tree
+    echo
+    echo
+    generate_file_contents
+  } > "${OUTPUT_FILE}"
+
+  (
+    echo "Done! Project context saved to: ${OUTPUT_FILE}"
+    if [ -f "${OUTPUT_FILE}" ]; then
+      if command -v du >/dev/null 2>&1; then
+        echo "File size: $(du -h "${OUTPUT_FILE}" | cut -f1)"
+      fi
+    fi
+  ) >&2
+}
+
+# --- Run Main ---
+main "$@"
