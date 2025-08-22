@@ -23,21 +23,44 @@ This script is **environment-aware**: if run inside a Git repository, it will au
 
 ## Installation
 
-1.  **Download the script:**
-    Save the script code into a file. Let's call it `myrepo`.
+### Option 1: Using the provided Makefile (recommended)
 
-2.  **Make it executable:**
-    Open your terminal and run the following command:
-    ```sh
-    chmod +x myrepo
-    ```
+The repository now includes a `Makefile` that installs a **symlink** to the script instead of copying it. This makes upgrades instant—just `git pull` and you're done.
 
-3.  **Place it in your PATH (Recommended):**
-    For easy access from any directory, move the script to a location in your system's `PATH`.
-    ```sh
-    cp myrepo ~/.local/bin/
-    ```
-    Now you can simply run `myrepo` from any directory.
+Default prefix: `~/.local` (so the link goes to `~/.local/bin/myrepo`). Override with `PREFIX=/desired/path`.
+
+```sh
+make install                  # installs to ~/.local/bin/myrepo
+make install PREFIX=/usr/local  # installs to /usr/local/bin/myrepo
+```
+
+Uninstall (removes only the symlink):
+
+```sh
+make uninstall
+```
+
+Notes:
+- The install target refuses to overwrite a non-symlink file at the destination.
+- Ensure `~/.local/bin` (or your chosen prefix bin dir) is on your PATH:
+  ```sh
+  export PATH="$HOME/.local/bin:$PATH"
+  ```
+
+### Option 2: Manual install (copy)
+
+```sh
+chmod +x myrepo
+cp myrepo ~/.local/bin/
+```
+
+### Option 3: Ad‑hoc usage
+
+Run it directly from the cloned directory:
+
+```sh
+./myrepo
+```
 
 ## Usage
 
