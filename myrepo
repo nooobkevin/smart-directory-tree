@@ -8,7 +8,7 @@ set -euo pipefail
 # --- Default Configuration ---
 DEFAULT_OUTPUT_FILE="repo.txt"
 DEFAULT_TREE_EXCLUDE=".git|node_modules|dist|build|target|venv|__pycache__|.pytest_cache|.coverage"
-DEFAULT_CONTENT_EXCLUDE="*.lock|LICENSE|*.pyc|*.pyo|*.pyd|*.so|*.dll|*.dylib|*.exe"
+DEFAULT_CONTENT_EXCLUDE="*.lock|LICENSE|*.pyc|*.pyo|*.pyd|*.so|*.dll|*.dylib|*.exe|.gitignore|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico|*.pdf|*.zip|*.tar.gz|*.tar.bz2|*.tar.xz|*.rar|*.7z|*.mp4|*.mp3|*.avi|*.mkv|*.mov|*.wmv|*.flv|*.class|*.jar|*.war|*.ear|.DS_Store|.githooks|.vscode|.editorconfig|.idea|.project|.classpath|.settings|.ropeproject"
 
 # --- Global State ---
 IS_GIT_REPO=0 # 0 for false, 1 for true
@@ -102,16 +102,14 @@ build_patterns() {
 path_matches_glob_list() {
   local path="$1"
   local glob_list="$2"
-  local saved_ifs=$IFS
-  IFS='|'
-  for pattern in $glob_list; do
-    IFS=$saved_ifs
+  local pattern
+  while IFS= read -r pattern; do
+    if [ -z "$pattern" ]; then continue; fi
     case "$path" in
-      $pattern|"$pattern/"*) return 0 ;;
+      $pattern|"$pattern/"*|*$pattern) return 0 ;;
     esac
-    IFS='|'
-  done
-  IFS=$saved_ifs
+  done <<< "${glob_list//|/$'\n'}" # Bash-specific string replacement
+
   return 1
 }
 
