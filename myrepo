@@ -173,12 +173,15 @@ build_tree_recursive() {
   local dir_path="$1"
   local prefix="$2"
   
-  local items=()
+  local -a items=()
   while IFS= read -r item; do
     items+=("$item")
-  done < <(ls -A "$dir_path" | sort)
+  done < <(ls -A "$dir_path" 2>/dev/null | sort)
 
   local num_items=${#items[@]}
+  if [ "$num_items" -eq 0 ]; then
+    return
+  fi
   local count=0
 
   for item in "${items[@]}"; do
