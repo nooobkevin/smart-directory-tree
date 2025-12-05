@@ -22,30 +22,45 @@ Generates a single-file context snapshot of the current directory.
 If run inside a Git repository, it will respect .gitignore files.
 
 General Options:
-  -o, --output <file>      Output file (default: ./${DEFAULT_OUTPUT_FILE})
-  -h, --help               Show this help and exit
+  -o, --output <file>       Output file (default: ./${DEFAULT_OUTPUT_FILE})
+  -h, --help                Show this help and exit
 
-Content Options (Part II - Primary):
-  -E, --only-exclude <p>   Override default content exclude glob pattern.
-  -e, --extra-exclude <p>  Add extra glob patterns to content exclude (pipe-separated).
-  -i, --extra-include <p>  Force include files matching this glob pattern in content.
-  -N, --no-gitignore       Don't use .gitignore for content filtering (has no effect outside a Git repo).
+Content Options:
+  -I, --only-include <p>    Only include files matching this glob pattern (whitelist).
+  -E, --only-exclude <p>    Override default content exclude glob pattern.
+  -e, --extra-exclude <p>   Add extra glob patterns to content exclude (pipe-separated).
+  -i, --extra-include <p>   Force include files matching this glob pattern in content.
+  -N, --no-gitignore        Don't use .gitignore for content filtering.
 
-Tree Options (Part I - Long-only):
-  --tree-only-exclude <p>   Override default tree exclude glob pattern.
-  --tree-extra-exclude <p>  Add extra glob patterns to tree exclude.
-  --tree-extra-include <p>  Force include files/dirs matching this glob pattern in the tree.
-  --tree-no-gitignore       Don't use .gitignore for tree filtering.
+Tree Options:
+  -tI, --tree-only-include <p>   Only include paths matching this glob pattern in tree.
+  -tE, --tree-only-exclude <p>   Override default tree exclude glob pattern.
+  -te, --tree-extra-exclude <p>  Add extra glob patterns to tree exclude.
+  -ti, --tree-extra-include <p>  Force include files/dirs matching this glob in tree.
+  -tN, --tree-no-gitignore       Don't use .gitignore for tree filtering.
+
+Pattern Behavior:
+  Patterns are pipe-separated globs (e.g., "src/*|lib/*|*.py").
+  When --only-include or --tree-only-include is specified, the effective set is:
+    ((only-include ∪ extra-include) - excludes) ∪ extra-include
+  The extra-include always forces inclusion, overriding any excludes.
+
+Examples:
+  $(basename "$0") -I "src/*|lib/*"              Only include src/ and lib/ in content
+  $(basename "$0") -tI "src/*" -I "src/*.py"     Show src/ in tree, only .py files in content
+  $(basename "$0") -I "src/*" -i "README.md"     Include src/ and force-include README.md
 EOF
   exit 0
 }
 
 # --- Initialize Variables ---
 OUTPUT_FILE="${DEFAULT_OUTPUT_FILE}"
+TREE_ONLY_INCLUDE=""
 TREE_ONLY_EXCLUDE=""
 TREE_EXTRA_EXCLUDE=""
 TREE_EXTRA_INCLUDE=""
 TREE_USE_GITIGNORE=1
+CONTENT_ONLY_INCLUDE=""
 CONTENT_ONLY_EXCLUDE=""
 CONTENT_EXTRA_EXCLUDE=""
 CONTENT_EXTRA_INCLUDE=""
@@ -64,16 +79,22 @@ check_if_git_repo() {
 parse_args() {
   while [ $# -gt 0 ]; do
     case "$1" in
+      # General
       -h|--help) usage ;;
       -o|--output) OUTPUT_FILE="$2"; shift 2 ;;
+      # Content options
+      -I|--only-include) CONTENT_ONLY_INCLUDE="$2"; shift 2 ;;
       -E|--only-exclude) CONTENT_ONLY_EXCLUDE="$2"; shift 2 ;;
       -e|--extra-exclude) CONTENT_EXTRA_EXCLUDE="$2"; shift 2 ;;
       -i|--extra-include) CONTENT_EXTRA_INCLUDE="$2"; shift 2 ;;
       -N|--no-gitignore) CONTENT_USE_GITIGNORE=0; shift ;;
-      --tree-only-exclude) TREE_ONLY_EXCLUDE="$2"; shift 2 ;;
-      --tree-extra-exclude) TREE_EXTRA_EXCLUDE="$2"; shift 2 ;;
-      --tree-extra-include) TREE_EXTRA_INCLUDE="$2"; shift 2 ;;
-      --tree-no-gitignore) TREE_USE_GITIGNORE=0; shift ;;
+      # Tree options
+      -tI|--tree-only-include) TREE_ONLY_INCLUDE="$2"; shift 2 ;;
+      -tE|--tree-only-exclude) TREE_ONLY_EXCLUDE="$2"; shift 2 ;;
+      -te|--tree-extra-exclude) TREE_EXTRA_EXCLUDE="$2"; shift 2 ;;
+      -ti|--tree-extra-include) TREE_EXTRA_INCLUDE="$2"; shift 2 ;;
+      -tN|--tree-no-gitignore) TREE_USE_GITIGNORE=0; shift ;;
+      # Unknown
       *) echo "Unknown option: $1" >&2; echo "Use -h or --help for usage." >&2; exit 1 ;;
     esac
   done
@@ -89,6 +110,7 @@ build_patterns() {
   output_basename=$(basename "${OUTPUT_FILE}")
   EFFECTIVE_TREE_EXCLUDE_GLOB="${tree_exclude_glob}|${output_basename}"
   EFFECTIVE_TREE_INCLUDE_GLOB="${TREE_EXTRA_INCLUDE}"
+  EFFECTIVE_TREE_ONLY_INCLUDE_GLOB="${TREE_ONLY_INCLUDE}"
 
   local content_exclude_glob="${CONTENT_ONLY_EXCLUDE:-$DEFAULT_CONTENT_EXCLUDE}"
   if [ -n "${CONTENT_EXTRA_EXCLUDE}" ]; then
@@ -96,37 +118,43 @@ build_patterns() {
   fi
   EFFECTIVE_CONTENT_EXCLUDE_GLOB="${content_exclude_glob}|${output_basename}"
   EFFECTIVE_CONTENT_INCLUDE_GLOB="${CONTENT_EXTRA_INCLUDE}"
+  EFFECTIVE_CONTENT_ONLY_INCLUDE_GLOB="${CONTENT_ONLY_INCLUDE}"
 }
 
 # --- Path Filtering Logic ---
 path_matches_glob_list() {
   local path="$1"
   local glob_list="$2"
-  local pattern
-  while IFS= read -r pattern; do
-    if [ -z "$pattern" ]; then continue; fi
+  local saved_ifs="$IFS"
+  IFS='|'
+  for pattern in $glob_list; do
+    IFS="$saved_ifs"
     case "$path" in
-      $pattern|"$pattern/"*|*$pattern) return 0 ;;
+      $pattern) return 0 ;;
     esac
-  done <<< "${glob_list//|/$'\n'}" # Bash-specific string replacement
-
+    case "$path" in
+      $pattern/*) return 0 ;;
+    esac
+    IFS='|'
+  done
+  IFS="$saved_ifs"
   return 1
 }
 
 path_is_ancestor_of_glob_list() {
-    local path="$1"
-    local glob_list="$2"
-    local saved_ifs=$IFS
+  local path="$1"
+  local glob_list="$2"
+  local saved_ifs="$IFS"
+  IFS='|'
+  for pattern in $glob_list; do
+    IFS="$saved_ifs"
+    case "$pattern" in
+      "$path"/*) return 0 ;;
+    esac
     IFS='|'
-    for pattern in $glob_list; do
-        IFS=$saved_ifs
-        case "$pattern" in
-            "$path/"*) return 0 ;;
-        esac
-        IFS='|'
-    done
-    IFS=$saved_ifs
-    return 1
+  done
+  IFS="$saved_ifs"
+  return 1
 }
 
 should_exclude_path() {
@@ -134,16 +162,45 @@ should_exclude_path() {
   local use_gitignore="$2"
   local exclude_glob="$3"
   local include_glob="$4"
+  local only_include_glob="$5"
 
+  # Root is never excluded
   if [ "$path" = "." ]; then return 1; fi
 
+  # PHASE 1: Force include check (extra-include has highest priority)
   if [ -n "$include_glob" ] && path_matches_glob_list "$path" "$include_glob"; then
-    return 1
+    return 1  # don't exclude - force included
   fi
-  
+
+  # PHASE 2: Only-include whitelist check
+  if [ -n "$only_include_glob" ]; then
+    local matches_only_include=1  # 1 = false
+    local is_ancestor_of_only_include=1
+
+    if path_matches_glob_list "$path" "$only_include_glob"; then
+      matches_only_include=0
+    fi
+    if path_is_ancestor_of_glob_list "$path" "$only_include_glob"; then
+      is_ancestor_of_only_include=0
+    fi
+
+    # If doesn't match and isn't ancestor of only-include patterns
+    if [ $matches_only_include -ne 0 ] && [ $is_ancestor_of_only_include -ne 0 ]; then
+      # Check if it's an ancestor of extra-include patterns (allow tree traversal)
+      if [ -n "$include_glob" ] && path_is_ancestor_of_glob_list "$path" "$include_glob"; then
+        : # Continue to normal exclude logic
+      else
+        return 0  # exclude - not in only-include whitelist
+      fi
+    fi
+  fi
+
+  # PHASE 3: Normal exclude logic (gitignore + custom excludes)
   local is_git_ignored=1 # 1 = false
-  if [ "$IS_GIT_REPO" -eq 1 ] && [ "$use_gitignore" -eq 1 ] && git check-ignore -q "$path"; then
-    is_git_ignored=0 # 0 = true
+  if [ "$IS_GIT_REPO" -eq 1 ] && [ "$use_gitignore" -eq 1 ]; then
+    if git check-ignore -q "$path" 2>/dev/null; then
+      is_git_ignored=0 # 0 = true
+    fi
   fi
 
   local is_custom_ignored=1
@@ -152,13 +209,49 @@ should_exclude_path() {
   fi
 
   if [ $is_git_ignored -eq 0 ] || [ $is_custom_ignored -eq 0 ]; then
+    # Check if this path is ancestor of force-included paths (allow tree traversal)
     if [ -n "$include_glob" ] && path_is_ancestor_of_glob_list "$path" "$include_glob"; then
-      return 1
+      return 1  # don't exclude - ancestor of force-included path
     fi
-    return 0
+    # Check if ancestor of only-include paths
+    if [ -n "$only_include_glob" ] && path_is_ancestor_of_glob_list "$path" "$only_include_glob"; then
+      return 1  # don't exclude - ancestor of only-included path
+    fi
+    return 0  # exclude
   fi
 
-  return 1
+  return 1  # don't exclude
+}
+
+# --- Helper: Check if path is a git submodule ---
+is_git_submodule() {
+  local path="$1"
+  # A submodule has a .git file (not directory) pointing to the parent's .git/modules
+  # Or it could be a .git directory if initialized standalone
+  [ -e "$path/.git" ]
+}
+
+# --- Helper: Count files in a directory respecting gitignore ---
+count_ignored_dir_contents() {
+  local dir_path="$1"
+  local files dirs
+
+  if is_git_submodule "$dir_path"; then
+    # For submodules, use git ls-files inside to respect its .gitignore
+    files=$(git -C "$dir_path" ls-files 2>/dev/null | wc -l | tr -d ' ')
+    # Count unique directories from the file list
+    dirs=$(git -C "$dir_path" ls-files 2>/dev/null | xargs -r dirname 2>/dev/null | sort -u | grep -v '^\.$' | wc -l | tr -d ' ')
+    echo "<submodule: $files tracked files, $dirs directories>"
+  else
+    # Regular directory - use find
+    files=$(find "$dir_path" -type f 2>/dev/null | wc -l | tr -d ' ')
+    dirs=$(find "$dir_path" -type d 2>/dev/null | wc -l | tr -d ' ')
+
+    if [ "$dirs" -gt 0 ]; then
+      dirs=$((dirs - 1))
+    fi
+    echo "<ignored $files files, $dirs directories>"
+  fi
 }
 
 # --- Part I: Smart Tree Generation ---
@@ -172,10 +265,10 @@ generate_smart_tree() {
 build_tree_recursive() {
   local dir_path="$1"
   local prefix="$2"
-  
-  local -a items=()
+
+  local items=()
   while IFS= read -r item; do
-    items+=("$item")
+    [ -n "$item" ] && items+=("$item")
   done < <(ls -A "$dir_path" 2>/dev/null | sort)
 
   local num_items=${#items[@]}
@@ -187,7 +280,7 @@ build_tree_recursive() {
   for item in "${items[@]}"; do
     count=$((count + 1))
     local full_path="${dir_path%/}/$item"
-    full_path=${full_path#./}
+    full_path="${full_path#./}"
 
     local connector="├──"
     local new_prefix="│   "
@@ -196,19 +289,13 @@ build_tree_recursive() {
       new_prefix="    "
     fi
 
-    if should_exclude_path "$full_path" "$TREE_USE_GITIGNORE" "$EFFECTIVE_TREE_EXCLUDE_GLOB" "$EFFECTIVE_TREE_INCLUDE_GLOB"; then
-        echo "${prefix}${connector} ${item}"
-        if [ -d "$full_path" ]; then
-            local files
-            files=$(find "$full_path" -type f 2>/dev/null | wc -l | tr -d ' ')
-            local dirs
-            dirs=$(find "$full_path" -type d 2>/dev/null | wc -l | tr -d ' ')
-            
-            if [ "$dirs" -gt 0 ]; then
-                dirs=$((dirs - 1))
-            fi
-            echo "${prefix}${new_prefix}└── <ignored $files files, $dirs directories>"
-        fi
+    if should_exclude_path "$full_path" "$TREE_USE_GITIGNORE" "$EFFECTIVE_TREE_EXCLUDE_GLOB" "$EFFECTIVE_TREE_INCLUDE_GLOB" "$EFFECTIVE_TREE_ONLY_INCLUDE_GLOB"; then
+      echo "${prefix}${connector} ${item}"
+      if [ -d "$full_path" ]; then
+        local summary
+        summary=$(count_ignored_dir_contents "$full_path")
+        echo "${prefix}${new_prefix}└── ${summary}"
+      fi
     else
       if [ -d "$full_path" ]; then
         echo "${prefix}${connector} ${item}/"
@@ -222,13 +309,13 @@ build_tree_recursive() {
 
 # --- Part II: File Content Generation ---
 get_all_files_for_content() {
-    # If it's a git repo and user wants to use gitignore, use git ls-files.
-    if [ "$IS_GIT_REPO" -eq 1 ] && [ "$CONTENT_USE_GITIGNORE" -eq 1 ]; then
-        git ls-files -co --exclude-standard
-    else
-        # Otherwise, fall back to `find`. Manually exclude .git directory.
-        find . -type f -not -path './.git/*'
-    fi
+  # If it's a git repo and user wants to use gitignore, use git ls-files.
+  if [ "$IS_GIT_REPO" -eq 1 ] && [ "$CONTENT_USE_GITIGNORE" -eq 1 ]; then
+    git ls-files -co --exclude-standard
+  else
+    # Otherwise, fall back to find. Manually exclude .git directory.
+    find . -type f -not -path './.git/*'
+  fi
 }
 
 generate_file_contents() {
@@ -236,10 +323,10 @@ generate_file_contents() {
   echo "=============="
 
   get_all_files_for_content | while IFS= read -r file_path; do
-    local norm_path=${file_path#./}
+    local norm_path="${file_path#./}"
 
-    if should_exclude_path "$norm_path" "$CONTENT_USE_GITIGNORE" "$EFFECTIVE_CONTENT_EXCLUDE_GLOB" "$EFFECTIVE_CONTENT_INCLUDE_GLOB"; then
-        continue
+    if should_exclude_path "$norm_path" "$CONTENT_USE_GITIGNORE" "$EFFECTIVE_CONTENT_EXCLUDE_GLOB" "$EFFECTIVE_CONTENT_INCLUDE_GLOB" "$EFFECTIVE_CONTENT_ONLY_INCLUDE_GLOB"; then
+      continue
     fi
 
     echo ""
@@ -260,11 +347,14 @@ main() {
   (
     echo "Generating project context..."
     if [ "$IS_GIT_REPO" -eq 0 ]; then
-        echo "Note: Not a Git repository. .gitignore files will be ignored."
+      echo "Note: Not a Git repository. .gitignore files will be ignored."
     fi
     echo "  Output file:             ${OUTPUT_FILE}"
     echo
-    echo "  Content Configuration (Primary):"
+    echo "  Content Configuration:"
+    if [ -n "${EFFECTIVE_CONTENT_ONLY_INCLUDE_GLOB}" ]; then
+      echo "    Only include (glob):   ${EFFECTIVE_CONTENT_ONLY_INCLUDE_GLOB}"
+    fi
     echo "    Exclude pattern (glob): ${EFFECTIVE_CONTENT_EXCLUDE_GLOB}"
     if [ -n "${CONTENT_EXTRA_INCLUDE}" ]; then
       echo "    Force include (glob):  ${CONTENT_EXTRA_INCLUDE}"
@@ -272,6 +362,9 @@ main() {
     [ "$IS_GIT_REPO" -eq 1 ] && echo "    Use .gitignore:        $([ "$CONTENT_USE_GITIGNORE" -eq 1 ] && echo "yes" || echo "no")"
     echo
     echo "  Tree Configuration:"
+    if [ -n "${EFFECTIVE_TREE_ONLY_INCLUDE_GLOB}" ]; then
+      echo "    Only include (glob):   ${EFFECTIVE_TREE_ONLY_INCLUDE_GLOB}"
+    fi
     echo "    Exclude pattern (glob): ${EFFECTIVE_TREE_EXCLUDE_GLOB}"
     if [ -n "${TREE_EXTRA_INCLUDE}" ]; then
       echo "    Force include (glob):  ${TREE_EXTRA_INCLUDE}"
@@ -291,7 +384,7 @@ main() {
     echo "Done! Project context saved to: ${OUTPUT_FILE}"
     if [ -f "${OUTPUT_FILE}" ]; then
       if command -v du >/dev/null 2>&1; then
-        echo "File size: $(du -h "${OUTPUT_FILE}" | cut -f1)"
+        echo "File size: $(ls -lh "${OUTPUT_FILE}" | awk '{print $5}')"
       fi
     fi
   ) >&2
