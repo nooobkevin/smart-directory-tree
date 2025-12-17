@@ -9,6 +9,13 @@ set -euo pipefail
 DEFAULT_OUTPUT_FILE="repo.txt"
 DEFAULT_TREE_EXCLUDE=".git|node_modules|dist|build|target|venv|__pycache__|.pytest_cache|.coverage"
 DEFAULT_CONTENT_EXCLUDE="*.lock|LICENSE|*.pyc|*.pyo|*.pyd|*.so|*.dll|*.dylib|*.exe|.gitignore|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.ico|*.pdf|*.zip|*.tar.gz|*.tar.bz2|*.tar.xz|*.rar|*.7z|*.mp4|*.mp3|*.avi|*.mkv|*.mov|*.wmv|*.flv|*.class|*.jar|*.war|*.ear|.DS_Store"
+DEFAULT_COUNT_SUMMARY_LIMIT=1024
+COUNT_SUMMARY_LIMIT="${COUNT_SUMMARY_LIMIT:-$DEFAULT_COUNT_SUMMARY_LIMIT}"
+case "$COUNT_SUMMARY_LIMIT" in
+  ''|*[!0-9]*)
+    COUNT_SUMMARY_LIMIT="$DEFAULT_COUNT_SUMMARY_LIMIT"
+    ;;
+esac
 
 # --- Global State ---
 IS_GIT_REPO=0 # 0 for false, 1 for true
@@ -231,6 +238,28 @@ is_git_submodule() {
   [ -e "$path/.git" ]
 }
 
+count_find_results() {
+  local dir_path="$1"
+  shift
+  local limit="$COUNT_SUMMARY_LIMIT"
+  local count=0
+  local complete=1
+
+  while IFS= read -r _; do
+    count=$((count + 1))
+    if [ "$limit" -gt 0 ] && [ "$count" -ge "$limit" ]; then
+      complete=0
+      break
+    fi
+  done < <(find "$dir_path" "$@" 2>/dev/null)
+
+  if [ "$complete" -eq 0 ]; then
+    echo "$limit:$complete"
+  else
+    echo "$count:$complete"
+  fi
+}
+
 # --- Helper: Count files in a directory respecting gitignore ---
 count_ignored_dir_contents() {
   local dir_path="$1"
@@ -243,14 +272,25 @@ count_ignored_dir_contents() {
     dirs=$(git -C "$dir_path" ls-files 2>/dev/null | xargs -r dirname 2>/dev/null | sort -u | grep -v '^\.$' | wc -l | tr -d ' ')
     echo "<submodule: $files tracked files, $dirs directories>"
   else
-    # Regular directory - use find
-    files=$(find "$dir_path" -type f 2>/dev/null | wc -l | tr -d ' ')
-    dirs=$(find "$dir_path" -type d 2>/dev/null | wc -l | tr -d ' ')
+    local file_count files_complete dir_count dirs_complete
+    IFS=: read -r file_count files_complete < <(count_find_results "$dir_path" -type f)
+    IFS=: read -r dir_count dirs_complete < <(count_find_results "$dir_path" -mindepth 1 -type d)
 
-    if [ "$dirs" -gt 0 ]; then
-      dirs=$((dirs - 1))
+    local file_label="$file_count"
+    local dir_label="$dir_count"
+    local file_suffix=" files"
+    local dir_suffix=" directories"
+
+    if [ "${files_complete:-1}" -eq 0 ]; then
+      file_label=">=${COUNT_SUMMARY_LIMIT}"
+      file_suffix=" files (limit reached)"
     fi
-    echo "<ignored $files files, $dirs directories>"
+    if [ "${dirs_complete:-1}" -eq 0 ]; then
+      dir_label=">=${COUNT_SUMMARY_LIMIT}"
+      dir_suffix=" directories (limit reached)"
+    fi
+
+    echo "<ignored ${file_label}${file_suffix}, ${dir_label}${dir_suffix}>"
   fi
 }
 
@@ -290,19 +330,20 @@ build_tree_recursive() {
     fi
 
     if should_exclude_path "$full_path" "$TREE_USE_GITIGNORE" "$EFFECTIVE_TREE_EXCLUDE_GLOB" "$EFFECTIVE_TREE_INCLUDE_GLOB" "$EFFECTIVE_TREE_ONLY_INCLUDE_GLOB"; then
-      echo "${prefix}${connector} ${item}"
       if [ -d "$full_path" ]; then
+        echo "${prefix}${connector} ${item}"
         local summary
         summary=$(count_ignored_dir_contents "$full_path")
         echo "${prefix}${new_prefix}└── ${summary}"
       fi
+      continue  # skip excluded files entirely
+    fi
+
+    if [ -d "$full_path" ]; then
+      echo "${prefix}${connector} ${item}/"
+      build_tree_recursive "$full_path" "${prefix}${new_prefix}"
     else
-      if [ -d "$full_path" ]; then
-        echo "${prefix}${connector} ${item}/"
-        build_tree_recursive "$full_path" "${prefix}${new_prefix}"
-      else
-        echo "${prefix}${connector} ${item}"
-      fi
+      echo "${prefix}${connector} ${item}"
     fi
   done
 }
